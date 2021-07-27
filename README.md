@@ -15,3 +15,7 @@ D30 18_09_25_kostas
 D113 19_10_29_kostas
     2 samples in 2 libraries: B2 C11
 
+## Proteomics analysis
+
+For the proteomics code, please refer to:  https://github.com/cnsb-boston/Omics_Notebook 
+Proteomics analysis contributors: Ryan M. Hekman and Benjamin Blum
