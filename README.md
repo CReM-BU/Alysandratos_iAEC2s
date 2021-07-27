@@ -1,6 +1,6 @@
 # Alysandratos_iAEC2s
 
-## Asociated manuscript
+## Manuscript
 
 Patient-specific iPSCs carrying an SFTPC mutation reveal the intrinsic alveolar epithelial dysfunction at the inception of interstitial lung disease 
 
