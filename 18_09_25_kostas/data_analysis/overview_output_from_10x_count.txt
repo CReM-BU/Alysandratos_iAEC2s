@@ -1,0 +1,54 @@
+Villanueva
+Estimated Number of Cells 3,560
+Mean Reads per Cell 74,382
+Median Genes per Cell 880
+
+
+Estimated Number of Cells 7,381
+Mean Reads per Cell 30,641
+Median Genes per Cell 1,070
+
+
+
+Kostas
+
+C11 (old)
+Estimated Number of Cells 283
+Mean Reads per Cell 865,919
+Median Genes per Cell 1,793
+
+B2
+Estimated Number of Cells 1,480
+Mean Reads per Cell 170,314
+Median Genes per Cell 2,075
+
+C11 (2nd)
+Estimated Number of Cells 555
+Mean Reads per Cell 978,895
+Median Genes per Cell 2,103
+
+++++++++
+
+
+B210000
+Estimated Number of Cells 7,085
+Mean Reads per Cell 21,232
+Median Genes per Cell 308
+
+B24000
+Estimated Number of Cells 8,765
+Mean Reads per Cell 10,717
+Median Genes per Cell 156
+
+
+C1112000
+Estimated Number of Cells 8,189
+Mean Reads per Cell 9,137
+Median Genes per Cell 216
+
+
+C114000
+Estimated Number of Cells 3,227
+Mean Reads per Cell 32,898
+Median Genes per Cell 262
+

@@ -1,0 +1,530 @@
+---
+title: "kostas aggregated analysis"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load data 
+If in SCC, use 
+module load R/3.5.0
+module load hdf5/1.8.18_gcc-6.2.0  # for hdf5r required by Seurat
+module load gcc/7.2.0  # for new installs
+
+```{r}
+ifelse(dir.exists("/mnt/scc/project_workspace/"),
+       cremwd <- "/mnt/scc/",
+       cremwd <- "/restricted/projectnb/crem-bioinfo/")
+
+calculations_path <- paste0(cremwd, "/project_workspace/18_07_11_kostas/calculations/analysis/")
+dir.create(calculations_path)
+data_path <- paste0(cremwd, "/project_data/18_07_11_kostas/")
+
+library(Seurat)
+library(dplyr)
+library(Matrix)
+
+# We sequenced two types of cells derived from human pluripotent stem cells from the lung epithelium. 
+# * One was grown under a specific type of media conditions to lead to proximal airway epithelial cells (proximal) 
+# * the other was grown with a different type of media that led to alveolar epithelial type 2 cells (distal, aka AEC2)
+# The most prominent lung marker gene is NKX2-1. 
+# The expectation is that some cells in both distal and proximal conditions will differentiate into lung and others will differentiate into other tissues (gut, liver, etc.). 
+# Some cells might be mitotic and others not. 
+# Some cells will contain:
+# Type I alveolar cells
+# Type II alveolar cells
+# Club/Clara/bronchiolar exocrine/secretory cells CYP4B1
+# bronchoalveolar stem cells = like Club but without secreting moco (MUC1)
+# ACTA2,BDKRB2,CAV1,CAV2,CHRM3,HRH1,STIM1,TRPC4,TRPC6  Human bronchial smooth muscle cells
+# *  type 2 cells (SFTPC, SFTPA1, ALPL, ITGB2), # distal? ITGB2 is at2 progenitor 
+# *  maybe basal cells (TP63, KRT5 markers), # proximal? top right
+# *  maybe secretory cells (SCGB3A2, CYP4B1). # proximal? bottom right
+# 
+# ¿qué poblaciones/clusters hay en mis ~1400 células? 
+# haz un tsne todos los clusters o con un par de biomarker genes, 
+# un heatmap o lo que quieras. 
+# Te dejo un listado de interesting genes que usamos para identificar clusters. 
+# 
+# P.D.: El gen EGFP es el GFP reporter, lo añadí yo a pelo. 
+# Lo usan para marker de pulmón y querían ver cómo de correlacionado estaba con NKX2-1.
+
+# pulmoner -> NKX2-1
+# distal "SFTPC"
+# basal "TP63"
+# secretory SCGB3A2
+# EGFP corr with NKX2-1
+
+# sparse.mat <-  Read10X(paste0(cremwd, "/project_workspace/18_07_11_kostas/calculations/cellranger_aggr/combined_data/outs/filtered_gene_bc_matrices_mex/hg19_tdtomato_genome_cellranger/"))
+
+# summary(apply(sparse.mat, 2, sum)) # total counts per cell
+   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+     54     212     334     500     588   16938   
+     # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+     # 99 1137045 1673104 1729479 2338090 5416283 
+# summary(apply(sparse.mat, 1, sum)) # total counts per gene
+   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+      0       0       7   12280    1228 7932615 
+# # > summary(apply(sparse.mat, 2, sum)) # total counts per cell
+# # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# # 6962   19991   29643   35371   44564  169770 
+# # > summary(apply(sparse.mat, 1, sum)) # total counts per gene
+# # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# # 0       0      10    1573     371 1173464 
+# 
+# # @slot raw.data The raw project data
+# # @slot data The normalized expression matrix (log-scale)
+# # @slot scale.data scaled (default is z-scoring each gene) expression matrix; used for dimmensional reduction and heatmap visualization
+# sc <- CreateSeuratObject(raw.data = sparse.mat, min.cells = 5, min.genes = 50, normalization.method = "LogNormalize", scale.factor = 1e4, is.expr = 0, do.scale = F, do.center = F, save.raw = T, project = "sc")
+# 
+# # sc
+# # An object of class seurat in project ctc 
+# #  20877 genes across 374 samples.
+# mito.genes <- grep("^MT-", rownames(sc@data), value = T)
+# percent.mito <- colSums(expm1(sc@data[mito.genes, ]))/colSums(expm1(sc@data))
+
+# summary(percent.mito)
+# #     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# # 0.002891 0.050050 0.073520 0.108900 0.123200 0.761900 
+# > summary(percent.mito)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 0.00000 0.01294 0.01830 0.02774 0.02996 0.67391 
+# summary(percent.mito)
+   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+0.00000 0.04110 0.06143 0.07506 0.09125 0.90875 
+# sc <- AddMetaData(sc, percent.mito, "percent.mito")
+# head(sc@meta.data)
+# #sc <- AddMetaData(sc, data.frame(row.names = sc@cell.names,
+#                                  orig.ident = sub(".C.*$", "", sc@cell.names)), 
+#                   "orig.ident")
+# VlnPlot(sc, c("nGene", "nUMI", "percent.mito"), nCol = 3, do.return = T) + geom_violin(alpha = 0.5)
+# ggsave(paste0(calculations_path, "violin.qc.pdf"))
+# 
+# sc <- SubsetData(sc, subset.name = "percent.mito", accept.high = 0.20)
+# # important diff
+# sc <- FindVariableGenes(sc, 
+#                               mean.function = ExpMean,
+#                               dispersion.function = LogVMR,
+#                               x.low.cutoff = 0.2, x.high.cutoff = 4, 
+#                               y.cutoff = 2, do.contour = F, num.bin = 30)
+# length(sc@var.genes)
+# # important diff
+# sc <- ScaleData(sc, vars.to.regress = c("nUMI", "percent.mito"), scale.max = 50)
+# # var.subset <- sc@var.genes[-grep("^MT-", sc@var.genes, value = F)]
+# # important diff: pc.genes = all genes
+# sc <- RunPCA(sc, 
+#                    pc.genes = rownames(sc@scale.data),
+#                    do.print = TRUE, pcs.print = 1:5, 
+#                    genes.print = 5)
+# 
+# saveRDS(sc, file = paste0(calculations_path, "sc.PCA.Rds"))
+# sc <- readRDS(paste0(calculations_path, "sc.PCA.Rds"))
+# # sc <- ProjectPCA(sc, do.center = T, replace.pc = T)
+# sc <- AddMetaData(sc, data.frame(row.names = sc@cell.names,
+#                                   orig.ident = sub("^.*-", "", sc@cell.names)), 
+#                   "orig.ident")
+# sc <- SetAllIdent(sc, id = "orig.ident")
+# PCAPlot(sc, 1, 2)
+# ggsave(paste0(calculations_path, "PCA.pdf"))
+# 
+# # clustering/modularity optimization
+# sc <- FindClusters(sc , reduction.type = "pca", resolution = seq(0.5, 2, 0.25), prune.SNN = 1/15, save.SNN = T)
+# colnames(sc@meta.data)
+# table(sc@meta.data$orig.ident)
+# table(sc@meta.data$res.2)
+# table(sc@meta.data$res.1.75)
+# table(sc@meta.data$res.1.5)
+# table(sc@meta.data$res.1.25)
+# table(sc@meta.data$res.1)
+# table(sc@meta.data$res.0.75)
+# table(sc@meta.data$res.0.5)
+# 
+# 
+# # visualize
+# sc <- SetAllIdent(sc, id = "res.1.25")
+# PCAPlot(sc, 1, 2)
+# ggsave(paste0(calculations_path, "PCA.res.1.25.pdf"))
+# 
+# # avg expr as markers per cluster
+# # cluster.averages <- AverageExpression(sc)
+# # cluster.averages[1:5, 1:5]
+# # cluster.averages <- AverageExpression(sc, return.seurat = TRUE) # as seurat object for plotting
+# # avg exp of one clust vs another:
+# # do.hover = T for an interactive plot to identify gene outliers
+# # CellPlot(cluster.averages, cell1 = "3", cell2 = "8", do.hover=TRUE)
+# 
+# sc <- readRDS(paste0(calculations_path, "sc.tSNE.Rds"))
+# sc@meta.data$orig.ident <- plyr::mapvalues(sc@meta.data$orig.ident, from = 1:7, to = c("B2","C11","C11_b","B2_10k","B2_4k","C11_10k","C11_4k"))
+
+# # manifold learning
+# PCElbowPlot(sc)
+# ggsave(paste0(calculations_path, "PCA.elbow.pdf"))
+# 
+# sc <- RunTSNE(sc, reduction.use = "pca",
+#                     dims.use = 1:12, do.fast = T,
+#                     add.iter = 0, perplexity = 30)
+# 
+# 
+# saveRDS(sc, file = paste0(calculations_path, "sc.tSNE.Rds"))
+sc <- readRDS(paste0(calculations_path, "sc.tSNE.Rds"))
+sc <- SetAllIdent(sc, id = "orig.ident")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave(paste0(calculations_path, "tSNE.pdf"))
+
+
+
+table(sc@meta.data$res.1.25)
+sc <- SetAllIdent(sc, id = "res.1.25")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave(paste0(calculations_path, "tSNE.res.1.25.pdf"))
+
+
+
+# Include additional data to display alongside cell names in data.hover
+# not present in fibroblast
+FeaturePlot(sc, features.plot = "NKX2-1")
+FeaturePlot(sc, features.plot = "ENSMUSG00000001496", do.hover = TRUE, data.hover = c("ident", "PC1", "nGene"))
+dev.off()
+# clustering refinement by means of: 
+# semi-supervised clustering: with lasso or by renaming clustering
+# select.cells <- TSNEPlot(sc, do.identify = TRUE)
+# sc <- SetIdent(sc, cells.use = select.cells, ident.use = "NewCells")
+# newcells.markers <- FindMarkers(object = sc, ident.1 = "NewCells", ident.2 = "foo", 
+#                                 min.diff.pct = 0.25, only.pos = TRUE)
+# head(x = newcells.markers)
+
+# markers per identity class
+table(sc@ident)
+# try with general clusters
+library(org.Mm.eg.db)
+fmauc <- function(sc, res) {
+  file_out <- paste0(calculations_path, "/", res, ".top30.clusterMarkers.csv")
+  sc <- SetAllIdent(sc, id = res)
+  table(sc@ident)
+  seurat.markers <- FindAllMarkers(sc, test.use = "roc", 
+                                       only.pos = F,
+                                       thresh.use = 0.25, do.print = T)
+  seurat.markers$symbol <- mapIds(org.Mm.eg.db,
+                                   keys=seurat.markers$gene,
+                                   column="SYMBOL",
+                                   keytype="ENSEMBL",
+                                   multiVals="first")
+  seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% top_n(30, avg_diff))
+  write.table(seurat.markers.summary, file = file_out, quote = F, row.names = F, col.names = T, sep = ",")
+  return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+sc.markers.orig <- fmauc(sc, "orig.ident")
+
+openxlsx::write.xlsx(sc.markers.orig$top[,c(1:6,8:10)], file.path(calculations_path, "orig.ident.top30.clusterMarkers.xlsx"), 
+  zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F
+  )
+sc.markers.res.1 <- fmauc(sc, "res.1")
+sc.markers.res.1.5 <- fmauc(sc, "res.1.5")
+sc.markers.res.2 <- fmauc(sc, "res.2")
+
+fmbim <- function(sc, res) {
+  file_out <- paste0(res, ".top30.clusterMarkers.bimod.csv")
+  sc <- SetAllIdent(sc, id = res)
+  table(sc@ident)
+  seurat.markers <- FindAllMarkers(sc, test.use = "bimod", 
+                                   only.pos = F,
+                                   thresh.use = 0.25, do.print = T)
+  seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% top_n(30, avg_diff))
+  write.table(seurat.markers.summary, file = file_out, quote = F, row.names = F, col.names = T, sep = ",")
+  return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+
+sc.markers.bimod.res.1 <- fmbim(sc, "res.1")
+sc.markers.bimod.res.1.5 <- fmbim(sc, "res.1.5")
+sc.markers.bimod.res.2 <- fmbim(sc, "res.2")
+write.table(sc.markers.bimod.res.1.5[[1]], file = "res.1.5.all.clusterMarkers.bimod.csv", quote = F, row.names = F, col.names = T, sep = ",")
+sc.markers.bimod.res.1.5[[1]]["TP63",]
+sc.markers.bimod.res.1.5[[1]]["MIR205HG",]
+sc.markers.bimod.res.1.5[[1]]["S100A2",]
+
+sc <- SetAllIdent(sc, id = "res.2")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave("tSNE_res.2.pdf")
+
+sc <- SetAllIdent(sc, id = "res.1")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave("tSNE_res.1.pdf")
+
+sc <- SetAllIdent(sc, id = "res.1.5")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave("tSNE_res.1.5.pdf")
+
+
+# set class nachoclass (1392 cells but total is 1429 cells) and visualize
+head(sc@meta.data)
+mycells <- rownames(sc@meta.data)
+mycells.class <- ifelse(mycells %in% rownames(nachoclus), nachoclus[match(mycells, rownames(nachoclus)), 1, drop=T], "unknown")
+table(mycells.class)
+sc <- AddMetaData(sc, data.frame(row.names = mycells, nacho= mycells.class), "nacho")
+head(nachoclus)
+
+sc <- SetAllIdent(sc, id = "nacho")
+TSNEPlot(sc, do.label = TRUE, pt.size = 0.5)
+ggsave("tSNE_nacho.pdf")
+
+old.ident <- c("3", "4", "8", "9", "10", "11", "12", "13", "Merged")
+new.ident <- c("Platelets", "B cells", "NK", "Plasma cells", "Plasmacytoid DC", "CD4", "Red cells", "CD4 helper/memory", "Monocytes/Macrophages")
+for (i in 1:9) {
+  sc.subset <- RenameIdent(object = sc.subset, old.ident.name = old.ident[i], new.ident.name = new.ident[i])
+}
+TSNEPlot(sc.subset, do.label = TRUE, pt.size = 0.5)
+ggsave("gral_analysis_tSNE.merged_renamed.pdf")
+
+# 1. Seurat
+# 1.1. Seurat imputation
+# 1.2. Seurat regressing cell cycle
+# 1.3. Seurat make tree
+# 2. sc3 clustering and corr 
+# 3. Magic imputation
+# 4. TDA embedding
+
+
+###########
+# 1.1. Seurat imputation # didn't work
+sc <- JackStraw(sc, num.replicate=1000, prop.freq=0.025)
+JackStrawPlot(sc, PCs = 1:11)
+ainb <- function(a,b) {a2=a[a%in%b];return(a2)}
+genes.sig <- PCASigGenes(sc, pcs.use = 1:11, max.per.pc = 30, pval.cut = 1e-2, use.full = FALSE)
+interesting_genes <- c(
+  "NKX2-1", "EGFP", "SFTA3", "SFTPB", "SOX2",
+  "AFP", "ALB",
+  "TFF1",
+  "SCGB3A2", 
+  "TOP2A", "AURKB", "MKI67", "BIRC5", 
+  "TP63", "KRT5",
+  "SCGB1A1", 
+  "SFTPC", "TFF2",
+  "SOX9", 
+  "HP",
+  "FOXJ1",
+  "BMP3", "FOXP2", "CPM", "FGF9",
+  "NKD1",
+  "GIF", "CLDN18", "MUC6",
+  "TF", "APOA1", "CYP4F3", "CYP3A7",
+  "PAX9", "KRT14",
+  "SFTA2", "AQP4",
+  "AXIN2")
+lasso.genes.use <- unique(c(genes.sig, sc@var.genes))
+sc <- AddImputedScore(sc, genes.use=lasso.genes.use, genes.fit=interesting_genes, 
+                      do.print=FALSE, s.use=40, gram=FALSE)
+sc@dr$pca@jackstraw@emperical.p.value.full
+###########
+# 1.2. Seurat regressing cell cycle
+# sc cycle copy 
+scc <- sc
+# Also read in a list of cell cycle markers, from Tirosh et al, 2015
+cc.genes <- readLines(con = "~/storage/crem/cell_cycle_vignette_files/regev_lab_cell_cycle_genes.txt")
+# We can segregate this list into markers of G2/M phase and markers of S
+# phase
+s.genes <- cc.genes[1:43]
+g2m.genes <- cc.genes[44:97]
+# related, GSEA-like: AddModuleScore()
+scc <- CellCycleSc1oring(scc, s.genes = s.genes, g2m.genes = g2m.genes, 
+                    set.ident = TRUE)
+
+# (try this after imputation with MAGIC)
+JoyPlot(scc, features.plot = c("PCNA", "TOP2A", "MCM6", "MKI67"), 
+        nCol = 2)
+scc <- RunPCA(scc, pc.genes = c(s.genes, g2m.genes), do.print = FALSE)
+PCAPlot(scc)
+# correct differences among differentiating cells (G2M and S) but don't correct separation with non-differenciating cells (G1)
+scc@meta.data$CC.Difference <- scc@meta.data$S.Score - scc@meta.data$G2M.Score
+scc <- ScaleData(object = scc, vars.to.regress = "CC.Difference", display.progress = FALSE)
+
+# cell cycle effects strongly mitigated in PCA
+scc <- RunPCA(object = scc, pc.genes = rownames(scc@scale.data), genes.print = 10)
+
+# when running a PCA on cell cycle genes, actively proliferating cells
+# remain distinct from G1 cells however, within actively proliferating
+# cells, G2M and S phase cells group together
+scc <- RunPCA(object = scc, pc.genes = c(s.genes, g2m.genes), do.print = FALSE)
+PCAPlot(object = scc)
+PCElbowPlot(scc)
+scc <- RunTSNE(scc, reduction.use = "pca",
+              dims.use = 1:18, do.fast = T,
+              add.iter = 0, perplexity = 30)
+TSNEPlot(scc, do.label = TRUE, pt.size = 0.5)
+scc <- SetAllIdent(scc, id = "res.1.5")
+
+###########
+# 1.3. Seurat make tree
+BuildClusterTree(scc)
+
+###########
+# 2. sc3 clustering
+# another clust method
+library(scater)
+library(SC3)
+sceset <- read10XResults(data_dir = "~/storage/crem/", 
+                         min_total_cell_counts = 1000,
+                         min_mean_gene_counts = NULL, 
+                         expand = TRUE, logExprsOffset = 1)
+sceset@assayData$counts[1:3,1:3]
+phenoData(sceset)
+table(unique(sceset@featureData@data$symbol) == sceset@featureData@data$symbol)
+sceset <- calculateQCMetrics(sceset)
+plotPCA(sceset)
+sceset <- sc3(sceset, gene_filter = FALSE, ks = 5:10, biology = TRUE)
+# saveRDS(sceset, "~/storage/crem/sceset.Rds")
+# explore results in shiny
+# sceset <- readRDS("~/storage/crem/sceset.Rds")
+sc3_interactive(sceset)
+sc3_plot_consensus(sceset, k = 8)
+sceset <- sc3_estimate_k(sceset)
+str(sceset@sc3)
+sc3_plot_silhouette(sceset, k = 10)
+# for Minerva
+sceset2 <- read10XResults(data_dir = "~/storage/crem/", 
+                         min_total_cell_counts = 1000,
+                         min_mean_gene_counts = NULL, 
+                         expand = TRUE, logExprsOffset = 1)
+sceset2@assayData$counts[1:3,1:3]
+phenoData(sceset2)
+table(unique(sceset2@featureData@data$symbol) == sceset2@featureData@data$symbol)
+sceset2 <- calculateQCMetrics(sceset2)
+saveRDS(sceset2, "~/storage/crem/sceset2.Rds")
+plotPCA(sceset2)
+sceset2 <- sc3(sceset2, gene_filter = T, n_cores=12, ks = 6:17, biology = TRUE)
+# minerva
+# bsub -J foo -P acc_HetLiverCancer -q premium -R span[hosts=1] -R "rusage[mem=1500]" -o %J.stdout -eo %J.stderr -L /bin/bash -n 13 -W 2:00 "module load R; Rscript --vanilla sc3.R"
+library(scater)
+library(SC3)
+sceset2 <- readRDS("/sc/orga/projects/HetLiverCancer/carlos/tmp/crem/sceset2.Rds")
+sceset3 <- sc3(sceset2, interactivity = F, gene.filter = T, n.cores=12, k_estimator=TRUE, ks = 6:16, biology = TRUE)
+saveRDS(sceset2, "/sc/orga/projects/HetLiverCancer/carlos/tmp/crem/sceset2.extended.Rds")
+
+###########
+# 3. Magic imputation
+library("devtools")
+install.packages("rsvd", repos = 'http://cran.rstudio.com', dependencies = T)
+install_github("pkathail/magic")
+library(rsvd)
+library(FNN)
+library(Rmagic)
+MAGIC_data <- run_magic(as.matrix(sc@data), t_diffusion=6 , rescale_percent=0)
+sc@data[1:5, 1:5]
+dim(sc@data)
+class(sc@data)
+
+###########
+# 4 TDA export
+
+lung <- c("NKX2-1", "EGFP")
+lung.mesench <- readLines(con = "~/storage/crem/marker.lung.mesen.txt")
+bronch <- readLines(con = "~/storage/crem/marker.bronchial.smooth.muscle.txt")
+at2 <- c("SFTPC", "SFTPA1", "ALPL")
+basal <- c("TP63", "KRT5")
+secre <- c("SCGB3A2", "CYP4B1")
+top.genes.sig <- PCASigGenes(sc, pcs.use = 1:10, max.per.pc = 30, pval.cut = 1e-2, use.full = FALSE)
+interesting_genes <- c(
+  "NKX2-1", "EGFP", "SFTA3", "SFTPB", "SOX2",
+  "AFP", "ALB",
+  "TFF1",
+  "SCGB3A2", 
+  "TOP2A", "AURKB", "MKI67", "BIRC5", 
+  "TP63", "KRT5",
+  "SCGB1A1", 
+  "SFTPC", "TFF2",
+  "SOX9", 
+  "HP",
+  "FOXJ1",
+  "BMP3", "FOXP2", "CPM", "FGF9",
+  "NKD1",
+  "GIF", "CLDN18", "MUC6",
+  "TF", "APOA1", "CYP4F3", "CYP3A7",
+  "PAX9", "KRT14",
+  "SFTA2", "AQP4",
+  "AXIN2")
+tda.subset <- unique(c(lung, lung.mesench, bronch, at2, basal, secre, top.genes.sig, interesting_genes, lasso.genes.use, cc.genes))
+magic <- read_csv("~/storage/crem/scdata.magic_imputed.csv")
+colnames(magic) <- sub("MAGIC ", "", colnames(magic))
+x <- as.data.frame(sc@ident)
+magic <- magic[which(magic$X1 %in% rownames(x)) , which(colnames(magic) %in% c("X1", tda.subset))]
+table(magic$X1 == rownames(x))
+magic$pheno <- x$`sc@ident`
+write.table(magic, file="~/storage/crem/scdata.magic_imputed_subset_tda.csv", sep = ",", col.names = T, row.names = F, quote = F )
+magic.log <- cbind(magic$X1, log(magic[-c(1, ncol(magic))]), magic$pheno)
+magic.log <- cbind(magic$X1, scale(magic[-c(1, ncol(magic))]), magic$pheno)
+write.table(magic.log, file="~/storage/crem/scdata.magic_imputed_subset_tda_log.csv", sep = ",", col.names = T, row.names = F, quote = F )
+summary(magic.log[,2:20])
+# try scale using magic input
+magic <- magic[which(magic$X1 %in% rownames(x)) ,]
+magic.mat <- data.matrix(magic[,-1])
+rownames(magic.mat) <- magic$X1
+magic.mat[1:4, 1:4]
+scm <- CreateSeuratObject(raw.data = t(magic.mat), min.cells = 5, min.genes = 200, normalization.method = "LogNormalize", scale.factor = 1e3, is.expr = 1, do.scale = T, do.center = T, save.raw = T, project = "scm")
+scm@scale.data[1:4,1:4]
+write.table(cbind(sample=colnames(scm@scale.data), pheno=x$`sc@ident`, as.data.frame(t(scm@scale.data))[,which(colnames(as.data.frame(t(scm@scale.data))) %in% tda.subset)]), file="~/storage/crem/mag.seu.sub.csv", sep = ",", col.names = T, row.names = F, quote = F )
+cbind(sample=colnames(scm@scale.data), pheno=x$`sc@ident`, as.data.frame(t(scm@scale.data)))[1:4,1:4]
+cbind(sample=colnames(scm@scale.data), pheno=x$`sc@ident`, as.data.frame(t(scm@scale.data))[,which(colnames(as.data.frame(t(scm@scale.data))) %in% tda.subset)])
+
+# parameters in Ayasdi that work well:
+# make column set of only genes (excludes pheno)
+# then run network on set "genes", and colour network by pheno
+
+# metric: correlation
+# Lens1: MDS
+# Lens2: MDS
+# res 30, gain 3, eq
+
+# metric: correlation
+# Lens1: L-infinity centrality
+# Lens2: Gaussian density
+# res 30, gain 3, eq
+```
+
+Venn diagrams
+
+```{r}
+# doesnt work. error w/ rJava
+require(rJava)
+require(venneuler)
+s1 <- rownames(read.table("/Volumes/Borlaug/UMH/DE/DE/out/export/interactionCultivarTime_effect/DEG.CultivarGalaxia.Time1.CultivarGalaxia.Time2.tsv", sep="\t", skip=1, row.names=1))
+s2 <- rownames(read.table("/Volumes/Borlaug/UMH/DE/DE/out/export/interactionCultivarTime_effect/DEG.CultivarGalaxia.Time2.CultivarGalaxia.Time3.tsv", sep="\t", skip=1, row.names=1))
+s3 <- rownames(read.table("/Volumes/Borlaug/UMH/DE/DE/out/export/interactionCultivarTime_effect/DEG.CultivarGalaxia.Time3.CultivarGalaxia.Time4.tsv", sep="\t", skip=1, row.names=1))
+A <- length(s1)
+B <- length(s2)
+C <- length(s3)
+AiB <- length(intersect(s1, s2))
+AiC <- length(intersect(s1, s3))
+BiC <- length(intersect(s2, s3))
+AiBiC <- length(intersect(intersect(s1, s2), s3))
+AiBdiffC <- length(setdiff(intersect(s1, s2), s3))
+AiCdiffB <- length(setdiff(intersect(s1, s3), s2))
+BiCdiffA <- length(setdiff(intersect(s2, s3), s1))
+AdiffBuC <- length(setdiff(s1, union(s2, s3)))
+BdiffAuC <- length(setdiff(s2, union(s1, s3)))
+CdiffAuB <- length(setdiff(s3, union(s1, s2)))
+v <- venneuler(c('0-6'=A, '6-24'=B, '24-54'=C, "0-6&6-24"=AB, "0-6&24-54"=AC, "6-24&24-54"=BC))
+plot(v)
+
+
+
+
+##################
+###### ALTERNATIVE
+##################
+
+library("gdata")
+# Now we can plot a Venn diagram with the VennDiagram R package, as follows:
+require("VennDiagram")
+# VENN.LIST <- list(ad80 = pos.4$X1, soraf = sora.pos$Gene)
+VENN.LIST <- list(ad80 = abs.4$symbol, soraf = sora$Gene)
+# VENN.LIST <- list(ad80 = neg.4$symbol, soraf = sora.neg$Gene)
+# VENN.LIST <- list(ad80 = pos.4$symbol, soraf = sora.pos$Gene)
+venn.plot <- venn.diagram(VENN.LIST , NULL, fill=c("darkmagenta", "darkblue"), na = "remove", alpha=c(0.5,0.5), cex = 2, cat.fontface=4, category.names=c("AD80 at time 4", "Sorafenib"), main="All genes abs(lfc) > 2")
+# venn.plot <- venn.diagram(VENN.LIST , NULL, fill=c("darkmagenta", "darkblue"), na = "remove", alpha=c(0.5,0.5), cex = 2, cat.fontface=4, category.names=c("AD80 at time 4", "Sorafenib"), main="Upregulated genes")
+# venn.plot <- venn.diagram(VENN.LIST , NULL, fill=c("darkmagenta", "darkblue"), na = "remove", alpha=c(0.5,0.5), cex = 2, cat.fontface=4, category.names=c("AD80 at time 4", "Sorafenib"), main="Downregulated genes") 
+# To plot the venn diagram we will use the grid.draw() function to plot the venn diagram
+grid.draw(venn.plot)
+dev.off()
+
+```

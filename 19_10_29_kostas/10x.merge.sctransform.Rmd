@@ -1,0 +1,871 @@
+---
+title: "Analysis 10X dataset"
+output: 
+  html_document:
+    fig_caption: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    number_sections: true
+    theme: cerulean
+editor_options: 
+  chunk_output_type: console
+params:
+  prefix: "merge"
+  resDEG: "SCT_snn_res.0.25"
+  percent.mito: 0.15
+  regress.batch: FALSE
+  sc.transform: TRUE
+---
+
+<!-- qrsh -P crem-seq -l h_rt=6:00:00 -pe omp 8 -->
+
+<!-- module load R/3.6.0 -->
+<!-- module load python3/3.6.5 # UMAP -->
+<!-- module load pandoc/2.5 # knitr -->
+
+<!-- R -->
+<!-- Testing: -->
+<!-- params <- list() -->
+<!-- params$prefix <- "merged" -->
+<!-- params$resDEG <- "SCT_snn_res.0.25" -->
+<!-- params$percent.mito <- 0.15 -->
+<!-- params$regress.batch <- FALSE -->
+<!--  Day1  Day13  Day14  Day5  Day7  Day9 -->
+
+
+
+```{r setup, include=FALSE, cache=FALSE}
+library(future)
+plan("multiprocess", workers = 8)
+options(future.globals.maxSize = 4000 * 1024^2)
+
+ifelse(dir.exists("/mnt/scc/project_workspace/"),
+       cremwd <- "/mnt/scc/",
+       cremwd <- "/restricted/projectnb/crem-bioinfo/")
+master_path <- file.path(cremwd, "/project_workspace/19_10_29_kostas/calculations/analysis/")
+prefix <- params$prefix
+calculations_path <- paste0(master_path, prefix, "/")
+plots_path <- file.path(calculations_path, "plots/")
+rds_path <- file.path(calculations_path, "rds/")
+cache_path <- file.path(calculations_path, "cache/") # it must end in a slash
+dir.create(rds_path, recursive = T)
+dir.create(plots_path, recursive = T)
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE,error = FALSE,warning = FALSE, cache = TRUE, cache.path = cache_path, fig.width=9,fig.height=7, autodep=TRUE, collapse = FALSE, fig.path = plots_path, fig.keep = "all", comment = "##", dev = c("png", "pdf"), cache.lazy = FALSE)
+options(tibble.print_max = 150)
+
+require(tidyverse)
+require(Seurat)
+library(Matrix)
+library(matrixStats) #rowVars
+library("magrittr")
+library("dplyr")
+library("RColorBrewer")
+library(kableExtra)
+library(data.table) # getting counts
+library(knitr)
+```
+
+
+```{r load_objects, eval=FALSE}
+sc <- readRDS(paste0(rds_path, "sc.Rds"))
+```
+
+```{r load_and_merge_from_scratch}
+seu.list <- list()
+sample.names <- c("KA_B2","KA_C11")
+for (i in 1:length(sample.names)) {
+  seu.list[[i]] <- readRDS(paste0(master_path, sample.names[i], "/rds/sc.Rds"))
+#  seu.list[[i]] <- UpdateSeuratObject(seu.list[[i]])
+  seu.list[[i]]@project.name <- sample.names[i]
+  seu.list[[i]]$orig.ident <- sample.names[i]
+  seu.list[[i]] <- DietSeurat(seu.list[[i]], counts = TRUE, scale.data = FALSE)
+}  
+
+sc.pre <- merge(seu.list[[1]], y = seu.list[-1], project = "sc")
+```
+
+
+# QC filtering
+
+```{r load_sc_qc, fig.height=4}
+cat("UMI counts per cell")
+summary(apply(GetAssayData(sc.pre, slot = "counts"), 2, sum))
+cat("UMI counts per gene")
+summary(apply(GetAssayData(sc.pre, slot = "counts"), 1, sum))
+sc.pre[['percent.mito']] <- PercentageFeatureSet(sc.pre, pattern = "^MT-")
+Idents(sc.pre) <- "orig.ident"
+saveRDS(sc.pre, paste0(rds_path, "sc.prefilt.Rds"))
+cat("Before filtering")
+plots <- VlnPlot(sc.pre, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3, pt.size = 0.1, combine = F) 
+plots <- lapply(X = plots, FUN = function(p) {
+  blank <- element_blank()
+  p + theme(axis.line.x = blank, axis.line.y = blank,
+ #           axis.text.x = blank, # comment on multisample analyses
+            axis.ticks.x = blank,
+            axis.title.x = blank, axis.title.y = blank)})
+CombinePlots(plots = plots, legend = "none", ncol = 3)
+ggsave(paste0(plots_path, "vln.qc.pre.pdf"))
+sc.pre
+keep.list <- list()
+for (i in 1:length(sample.names)) {
+  keep.list[[i]] <- readRDS(paste0(master_path, sample.names[i], "/rds/keep.cells.Rds"))
+  keep.list[[i]] <- paste(keep.list[[i]], i, sep = "_") # add prefixes
+}  
+keep.list <- unlist(keep.list)
+
+sc <- sc.pre[, keep.list]
+saveRDS(keep.list, paste0(rds_path, "keep.cells.Rds"))
+
+cat("After filtering doublets and degraded cells")
+plots <- VlnPlot(sc, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), ncol = 3, pt.size = 0.1, combine = F) 
+plots <- lapply(X = plots, FUN = function(p) {
+  blank <- element_blank()
+  p + theme(axis.line.x = blank, axis.line.y = blank,
+  #          axis.text.x = blank, # comment on multisample analyses
+            axis.ticks.x = blank,
+            axis.title.x = blank, axis.title.y = blank)})
+CombinePlots(plots = plots, legend = "none", ncol = 3)
+ggsave(paste0(plots_path, "vln.qc.after.pdf"))
+sc
+```
+
+
+```{r interesting_genes}
+interesting_genes <- c(
+  "NKX2-1", "EGFP_EXTRA", "TDTOMATO_EXTRA_IVS", "SFTA3", "SFTPB", "SOX2",
+  "AFP", "ALB",
+  "TFF1", # gut/gastric
+  "CDX2", # intestinal
+  "SCGB3A2", # type 2 cells
+  "TOP2A", "AURKB", "MKI67", "BIRC5", # cell cycle
+  "TP63", "KRT5",
+  "SCGB1A1", 
+  "SFTPC", "TFF2",
+  "SOX9", 
+  "HP",
+  "FOXJ1",
+  "BMP3", "FOXP2", "CPM", "FGF9",
+  "NKD1",
+  "GIF", "CLDN18", "MUC6",
+  "TF", "APOA1", "CYP4F3", "CYP3A7",
+  "PAX9", "KRT14",
+  "SFTA2", "AQP4",
+  "AXIN2")
+
+
+cat("Pre-selected genes: ", interesting_genes)
+interesting_genes <- interesting_genes[interesting_genes %in% rownames(sc)]
+cat("Pre-selected genes expressed in current dataset: ", interesting_genes)
+```
+
+# Dimensionality reduction
+
+Regressing out the confounding effect of cell degradation (by modeling the mitochondrial percentage as a latent variable).
+
+```{r dim_red_pca}
+if (params$sc.transform) {
+  if (params$regress.batch) {
+    sc <- SCTransform(sc, vars.to.regress=c("percent.mito", "orig.ident"), verbose = FALSE)
+  } else {
+    sc <- SCTransform(sc, vars.to.regress="percent.mito", verbose = FALSE)
+  }
+} else {
+  ###### FORK 1: STANDARD WORKFLOW
+  sc <- NormalizeData(sc)
+  sc <- FindVariableFeatures(sc)
+  # HVFInfo(sc)
+  cat("Variable gene selection: ", length(VariableFeatures(sc)))
+  all.genes <- rownames(sc)
+  if (params$regress.batch) {
+    sc <- ScaleData(sc, features = all.genes, vars.to.regress=c("percent.mito", "orig.ident"), display.progress = F) # default: only scales var.genes, which misses some in heatmap
+  # sc <- ScaleData(sc, vars.to.regress=c("percent.mito", "orig.ident"), display.progress = F)
+  } else {
+    sc <- ScaleData(sc, features = all.genes, vars.to.regress="percent.mito", display.progress = F) # default: only scales var.genes, which misses some in heatmap
+  # sc <- ScaleData(sc, vars.to.regress=c("percent.mito", "orig.ident"), display.progress = F)
+  }
+}
+###### FORK 2: ALTERNATIVE WORKFLOW
+## replaces NormalizeData, ScaleData, FindVariableFeatures
+## use in combination with higher PCs for downstream (~30)
+## sc <- SCTransform(sc, vars.to.regress = "percent.mito", verbose = FALSE)
+
+# Example summary workflow 
+# sc <- CreateSeuratObject(sc_data) %>% PercentageFeatureSet(pattern = "^MT-", col.name = "percent.mito") %>% 
+#     SCTransform(vars.to.regress = "percent.mt") %>% RunPCA() %>% FindNeighbors(dims = 1:30) %>% 
+#     RunUMAP(dims = 1:30) %>% FindClusters()
+####### END OF FORK
+
+ 
+sc <- RunPCA(sc)
+sc <- ProjectDim(sc, verbose = F)
+print(x = sc[['pca']], dims = 1:5, nfeatures = 5, projected = FALSE)
+
+# sc <- JackStraw(sc, num.replicate = 100)
+# sc <- ScoreJackStraw(sc, dims = 1:20)
+ElbowPlot(sc)
+ggsave(paste0(plots_path, "elbow.pdf"))
+DimPlot(sc, reduction = "pca")
+#ggsave(paste0(plots_path, "PCA.pdf"))
+```
+
+These are the genes driving the first 9 principal components
+
+```{r dim_heatmap, fig.height=11}
+DimHeatmap(sc, dims = 1:9, cells = 500, balanced = TRUE)
+```
+
+
+# Clustering
+
+Use tSNE and UMAP for non-linear dimensionality reduction
+
+Use Louvain algorithm for community detection.
+
+```{r cluster_and_rdim, eval=TRUE, results=FALSE}
+sc <- FindNeighbors(sc, dims = 1:20)
+sc <- FindClusters(sc, resolution = seq(1.5, 0.25, -0.25)) # reverse order, seurat_clusters takes last run's value
+sc <- RunTSNE(sc, dims = 1:20)
+sc <- RunUMAP(sc, dims = 1:20)
+# Idents(sc) <- "orig.ident"
+```
+
+Non-linear dimensionality reduction with tSNE and UMAP
+
+```{r plot_rdim}
+Idents(sc) <- "orig.ident"
+plot1 <- DimPlot(sc, reduction = "tsne") + theme_void() + labs(title ="tSNE")
+plot2 <- DimPlot(sc, reduction = "umap") + theme_void() + labs(title ="UMAP")
+CombinePlots(plots = list(plot1, plot2), legend = 'bottom')
+ggsave(paste0(plots_path, "rdim.pdf"), width = 7, height = 3)
+```
+
+
+```{r}
+saveRDS(sc, paste0(rds_path, "sc.Rds"))
+```
+
+Number of cells per cluster at different Louvain resolutions:
+
+```{r}
+if (params$sc.transform) {
+  table(sc$SCT_snn_res.1.5)
+  table(sc$SCT_snn_res.1.25)
+  table(sc$SCT_snn_res.0.75)
+  table(sc$SCT_snn_res.0.5)
+  table(sc$SCT_snn_res.0.25)
+  table(sc$seurat_clusters)
+  table(sc$orig.ident)
+} else {
+  table(sc$RNA_snn_res.1.5)
+  table(sc$RNA_snn_res.1.25)
+  table(sc$RNA_snn_res.0.75)
+  table(sc$RNA_snn_res.0.5)
+  table(sc$RNA_snn_res.0.25)
+  table(sc$seurat_clusters)  
+  table(sc$orig.ident)
+}
+```
+
+# Cell-cycle stage classification
+
+Score G1, G2/M and S signatures in each cell.
+
+Classify phase based on that score.
+
+```{r CC_regression, eval=TRUE}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+sc <- CellCycleScoring(sc, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+# head(sc[[]])
+grouping <- "Phase"; DimPlot(sc, reduction.use = "umap", group.by =  grouping, pt.size = 2) + NoAxes()
+if (params$sc.transform) {
+  kable(table(sc$Phase, sc$SCT_snn_res.0.25), caption="Cell cycle stage classification per cluster") %>%   kable_styling() %>%   scroll_box(width = "100%", height = "200px")
+} else {
+  kable(table(sc$Phase, sc$RNA_snn_res.0.25), caption="Cell cycle stage classification per cluster") %>%   kable_styling() %>%   scroll_box(width = "100%", height = "200px")
+}
+```
+
+# Molecular Signatures scoring
+
+Compute enrichment for molecular signatures using method from Tirosh et al, Science (2016)
+
+```{r mol_sig_score, fig.height=11}
+msig <- scan(paste0(cremwd, "/reference_data/gene_sets/lung.matur.differ.MSig.txt"), what="", sep="\n") # Read in the data
+msig <- sapply(msig, function(k) gsub(",$", "", k))
+msig <- strsplit(msig, ",[[:space:]]+")  # Separate elements by a comma and one or more whitepace
+names(msig) <- sapply(msig, `[[`, 1)  # subset the first vector element and set it as the list element name
+msig <- lapply(msig, `[`, -1) # Remove the first vector element from each list element
+sc <- AddModuleScore(sc, features = msig, name = names(msig))
+```
+
+# UMAP clusters
+
+```{r facetted_louvain_clusters_UMAP, fig.height=6}
+if (params$sc.transform) {
+  grouping <- "SCT_snn_res.0.25"; p1 <- DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping) 
+  grouping <- "SCT_snn_res.0.5"; p2 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "SCT_snn_res.0.75"; p3 <- DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "SCT_snn_res.1"; p4 <-DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "SCT_snn_res.1.25"; p5 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "SCT_snn_res.1.5"; p6 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+} else {
+  grouping <- "RNA_snn_res.0.25"; p1 <- DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping) 
+  grouping <- "RNA_snn_res.0.5"; p2 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "RNA_snn_res.0.75"; p3 <- DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "RNA_snn_res.1"; p4 <-DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "RNA_snn_res.1.25"; p5 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+  grouping <- "RNA_snn_res.1.5"; p6 <-  DimPlot(sc, group.by =  grouping, plot.title= grouping, pt.size = 2) + theme_void() + labs(title = grouping)
+}
+CombinePlots(plots = list(p1, p2, p3, p4, p5, p6))
+ggsave(paste0(plots_path, "rdim.clust.pdf"), width = 10, height = 7)
+```
+
+
+# UMAP pre-selected features
+
+```{r pre_selected_marker_genes_UMAP,  fig.height=18}
+interesting_feats <- c("nFeature_RNA", "nCount_RNA", "percent.mito", paste0("PC_", 1:10), paste0(names(msig), 1:length(msig)), interesting_genes)
+plots <- FeaturePlot(sc, features = interesting_feats, cols = c("#f0f0f0", brewer.pal(9,"OrRd")), pt.size = 1, combine=F)
+plots <- lapply(X = plots, FUN = function(p) {
+  blank <- element_blank()
+  p + theme(axis.line.x = blank, axis.line.y = blank,
+            axis.text.x = blank, axis.text.y = blank, 
+            axis.title.x = blank, axis.title.y = blank,
+            axis.ticks.x = blank, axis.ticks.y = blank)})
+CombinePlots(plots = plots, legend = "bottom", ncol = 6)
+```
+
+
+# Differential expression
+
+Differential expression model: MAST, Finak et al.: 
+https://genomebiology.biomedcentral.com/articles/10.1186/s13059-015-0844-5 
+
+For a recent comparison on the performance of different methods for single-cell differential expression, see:
+https://www.nature.com/articles/nmeth.4612
+
+ 
+```{r use_seurat, fig.height=15}
+fmas <- function(sc, res) {
+    Idents(sc) <- res
+    file_out <- paste0(calculations_path, res, ".DEG.clusterMarkers.xlsx")
+    seurat.markers <- FindAllMarkers(sc, test.use = "MAST", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, verbose = F)
+    seurat.markers.summary <- as.data.frame(seurat.markers %>% group_by(cluster) %>% dplyr::filter(p_val_adj < 0.05) %>% top_n(20, avg_logFC))
+    openxlsx::write.xlsx(seurat.markers, file_out, zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F)
+    return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+resDEG <- params$resDEG
+sc.markers.mas.res <- fmas(sc, resDEG)
+saveRDS(sc.markers.mas.res, paste0(rds_path, "sc.markers.mas.", resDEG, ".Rds"))
+```
+
+Table of top 20 DEG per cluster
+
+```{r}
+sc.markers.mas.res[[2]] %>% dplyr::mutate(cluster = cell_spec(
+    cluster, color = "white", bold = T,
+    background = spec_color(as.numeric(factor(cluster)), end = 0.9, direction = -1)
+  )) %>% kable(escape = F, caption=paste0("Top DEG for clusters at ", resDEG )) %>%   kable_styling() %>%   scroll_box(width = "100%", height = "600px")
+```
+
+
+# Heatmap of DEG
+
+Heatmap of top 20 DEG per cluster
+
+```{r heatmap_DEG, fig.height=15}
+Idents(sc) <- resDEG
+DoHeatmap(sc, features = sc.markers.mas.res[[2]]$gene) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+```
+
+```{r eval= FALSE}
+experiment.aggregate <- BuildClusterTree(
+  experiment.aggregate,
+  pcs.use = use.pcs,
+  do.reorder = F,
+  reorder.numeric = F,
+  do.plot=F)
+PlotClusterTree(experiment.aggregate)
+ColorTSNESplit(experiment.aggregate, node = 30)
+```
+
+```{r save_object}
+saveRDS(sc, paste0(rds_path, "sc.Rds"))
+```
+
+# UMAP of DEG
+
+```{r feat_DEG_UMAP, fig.height=60}
+# when allowing duplicates gives error
+plots <- FeaturePlot(sc, features = unique(sc.markers.mas.res[[2]]$gene), cols = c("#f0f0f0", brewer.pal(9,"OrRd")), pt.size = 1, combine=F) 
+plots <- lapply(X = plots, FUN = function(p) {
+  blank <- element_blank()
+  p + theme(axis.line.x = blank, axis.line.y = blank,
+            axis.text.x = blank, axis.text.y = blank, 
+            axis.title.x = blank, axis.title.y = blank,
+            axis.ticks.x = blank, axis.ticks.y = blank)})
+CombinePlots(plots = plots, legend = "bottom", ncol = 6)
+```
+
+
+```{r export_spring}
+export.data <- GetAssayData(sc, slot = "data")
+export.genes <- rownames(sc)
+write.table(as.matrix(export.data), gzfile(paste0(calculations_path, "spring.data.tsv.gz")), sep = "\t", quote = F, col.names = T, row.names = T )
+write.table(export.genes, paste0(calculations_path, "spring.genes.tsv"), sep = "\t", quote = F, col.names = F, row.names = F )
+# naming convention depends on the usage of regularized NB transformation (sctransform)
+if (params$sc.transform) {
+  meta.subset <- sc[[c("orig.ident","Phase", "SCT_snn_res.0.25", "SCT_snn_res.0.5", "SCT_snn_res.0.75", "SCT_snn_res.1")]]
+} else {
+  meta.subset <- sc[[c("orig.ident","Phase", "RNA_snn_res.0.25", "RNA_snn_res.0.5", "RNA_snn_res.0.75", "RNA_snn_res.1")]]
+}
+groupings <- t(meta.subset) # discrete metadata
+meta.continuous <- sc[[paste0(names(msig), 1:length(msig))]] # continuous, numerical metadata (i.e. molecular signature scores)
+custom.color.tracks <- t(meta.continuous)
+write.table(custom.color.tracks, paste0(calculations_path, "spring.custom.color.tracks.csv"), sep = ",", quote = F, col.names = F, row.names = T )
+write.table(groupings, paste0(calculations_path, "spring.groupings.csv"), sep = ",", quote = F, col.names = F, row.names = T )
+# spring server: 
+# lentibarcode
+# dkottonlab!
+# https://kleintools.hms.harvard.edu/tools/springViewer_1_6_dev.html?client_datasets/lentibarcode/lentibarcode
+```
+
+
+```{r fgsea}
+sc$annot <- sub("KA_", "", sc$orig.ident)
+Idents(sc) <- "annot"
+fmas.pair <- function(sc, res, id1, id2, subsets, suffix) {
+    file_out <- paste0(calculations_path, "DEG.pairwise.", suffix, ".", res, ".xlsx")
+    seurat.markers <- FindMarkers(sc, test.use = "MAST", only.pos = FALSE, min.pct = 0.10, logfc.threshold = 0, verbose = F, group.by = res,  ident.1 = id1, ident.2 = id2, subset.ident = subsets)
+    seurat.markers.summary <- as.data.frame(seurat.markers) %>%  rownames_to_column('gene') %>% dplyr::filter(p_val_adj < 0.05) %>% dplyr::arrange(desc(avg_logFC)) %>% dplyr::filter(row_number() %in% 1:20 | row_number() %in% (n()-19):n())
+    openxlsx::write.xlsx(seurat.markers, file_out, zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = T)
+    return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+mas.pair1 <- fmas.pair(sc, "annot", id1 = "C11", id2 = "B2", subsets = NULL, suffix = "C11_vs_B2")
+mas.pair1 <- mas.pair1[[1]] %>% rownames_to_column("row.names")
+
+library(fgsea)
+library(msigdbr)
+set.seed(42)
+msig.H <- msigdbr(species = "Homo sapiens", category = "H")
+names(table(msig.H$gs_name))
+msig.H <- as.data.frame(msig.H[,c(2, 5)])
+msig.H <- split(msig.H$human_gene_symbol, msig.H$gs_name)
+library(BiocParallel)
+BPPARAM=MulticoreParam(workers = 8)
+#  bpparam()
+ranks1 <- mas.pair1$avg_logFC
+names(ranks1) <- mas.pair1$row.names
+fgsea.1 <- fgsea(pathways = msig.H , 
+                        stats = ranks1,
+                        minSize=15,
+                        maxSize=500,
+                        nperm = 1000)
+head(fgsea.1[order(NES, decreasing = T), ])
+tail(fgsea.1[order(NES, decreasing = T), ])
+head(fgsea.1[order(pval), ])
+data.table::fwrite(fgsea.1[order(pval), ], file=paste0(calculations_path, "fgsea_C11_vs_B2_hallmarks.tsv"), sep="\t", sep2=c("", " ", ""))
+# https://stats.stackexchange.com/questions/263831/over-represented-values-in-fdr-adjusted-p-values
+
+pdf(paste0(plots_path, "FGSEA.tb.Hallmarks.pdf"), width=12, height=15)
+topPathways <- fgsea.1[order(NES, decreasing = T), pathway]
+plotGseaTable(msig.H[topPathways], ranks1, fgsea.1)
+dev.off()
+
+# autophagy, lysosomes, mitochondria in the pathways we suspect distinguish C11 from B2 (can be up or down). Can you send me those?
+ 
+# In particular from our list below from the GSEA you already did, I am most interested in the maps for the mTORC1 signaling, the NFKB, oxidative phosphorylation, and the PI3K-AKT-mTOR signaling
+keep.gs <- names(table(grep("APOPTOSIS|MTORC|NFKB|OXYDATIVE_PHOSPORILATION|PI3K|LYSOSO", msigdbr()$gs_name, value = T)))
+keep.gs <- filter(keep.gs, )
+keep.gs <- keep.gs[-grep("^GSE|_UP$|_DN$", keep.gs)]
+msig.custom <- msigdbr(species = "Homo sapiens") %>% filter(gs_name %in% keep.gs)
+names(table(msig.custom$gs_name))
+msig.custom <- as.data.frame(msig.custom[,c(2, 5)])
+msig.custom <- split(msig.custom$human_gene_symbol, msig.custom$gs_name)
+fgsea.2 <- fgsea(pathways = msig.custom , 
+                        stats = ranks1,
+                        minSize=15,
+                        maxSize=500,
+                        nperm = 1000)
+head(fgsea.2[order(NES, decreasing = T), ])
+tail(fgsea.2[order(NES, decreasing = T), ])
+head(fgsea.2[order(pval), ])
+data.table::fwrite(fgsea.2[order(pval), ], file=paste0(calculations_path, "fgsea_C11_vs_B2_selected_gene_sets.tsv"), sep="\t", sep2=c("", " ", ""))
+
+pdf(paste0(plots_path, "FGSEA.tb.Selected.pdf"), width=12, height=15)
+topPathways <- fgsea.2[head(order(pval), n=50)][order(NES, decreasing = T), pathway]
+plotGseaTable(msig.custom[topPathways], ranks1, fgsea.2)
+dev.off()
+```
+
+
+
+```{r plot_heatmap}
+# switch to RNA normalized for heatmap visualization
+DefaultAssay(sc) <- "RNA"
+sc <- NormalizeData(sc)
+all.genes <- rownames(sc)
+sc <- ScaleData(sc, features = all.genes, vars.to.regress="percent.mito", verbose = T) # default: only scales var.genes, which misses some in heatmap
+
+DefaultAssay(sc) <- "SCT"
+
+
+
+allDEG <- mas.pair1 %>% filter(p_val_adj < 0.05) %>% pull(row.names)
+idx <- msig.H 
+idx <- msig.custom 
+
+fgsea <- fgsea.1
+fgsea <- fgsea.2
+dir.create(paste0(plots_path, "Heatmaps_HALLMARKS"), recursive = T)
+dir.create(paste0(plots_path, "Heatmaps_SELECTED_GENE_SETS"), recursive = T)
+
+DefaultAssay(sc) <- "RNA"
+for (i in 1:nrow(fgsea)) {
+  genes <- fgsea[i, "leadingEdge"][[1]][[1]]
+  height.fig <- (0.11 * length(genes) ) + 2
+  g <- DoHeatmap(sc, features = genes, raster = F) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+  # ggsave(paste0(plots_path, "Heatmaps_SELECTED_GENE_SETS/Hm.", fgsea$pathway[i], ".DEG.pdf"), g, width=7, height=height.fig)
+  ggsave(paste0(plots_path, "Heatmaps_HALLMARKS/Hm.", fgsea$pathway[i], ".DEG.pdf"), g, width=7, height=height.fig)
+}
+
+
+x <- msigdbr()
+# keep.gs <- names(table(grep("LUNG|SURFACTANT", x$gs_name, value = T))) # 127, GO 19
+keep.gs <- x[grep("^GO_", x$gs_name, value = F), ] %>% filter(gs_subcat == "BP") %>% pull(gs_name) %>% unique()
+length(keep.gs)
+msig.custom <- x %>% filter(gs_name %in% keep.gs)
+names(table(msig.custom$gs_name))
+msig.custom <- as.data.frame(msig.custom[,c(2, 5)])
+openxlsx::write.xlsx(msig.custom , paste0(calculations_path, "GO_BP.xlsx"), zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F)
+msig.custom <- split(msig.custom$human_gene_symbol, msig.custom$gs_name)
+summary(sapply(msig.custom, length))
+# summary(sapply(msig.custom[sig_pathways], length))
+fgsea.3 <- fgsea(pathways = msig.custom , 
+                        stats = ranks1,
+                        minSize=15,
+                        maxSize=500,
+                        nperm = 1000)
+head(fgsea.3[order(NES, decreasing = T), ])
+tail(fgsea.3[order(NES, decreasing = T), ])
+head(fgsea.3[order(pval), ])
+data.table::fwrite(fgsea.3[order(pval), ], file=paste0(calculations_path, "fgsea_C11_vs_B2_GO.BP.tsv"), sep="\t", sep2=c("", " ", ""))
+
+pdf(paste0(plots_path, "FGSEA.tb.GO.BP.pdf"), width=12, height=15)
+topPathways <- fgsea.3[head(order(pval), n=50)][order(NES, decreasing = T), pathway]
+plotGseaTable(msig.custom[topPathways], ranks1, fgsea.3)
+dev.off()
+
+pdf(paste0(plots_path, "FGSEA.tb.GO.BP.onlyTop50pos.pdf"), width=12, height=15)
+topPathways <- fgsea.3[head(order(NES, decreasing = T), n=50)][order(NES, decreasing = T), pathway]
+plotGseaTable(msig.custom[topPathways], ranks1, fgsea.3)
+dev.off()
+
+idx <- msig.custom[topPathways] 
+fgsea <- fgsea.3[fgsea.3$pathway %in% topPathways, ]
+dir.create(paste0(plots_path, "Heatmaps_GO.BP"), recursive = T)
+DefaultAssay(sc) <- "RNA"
+for (i in 1:nrow(fgsea)) {
+  genes <- fgsea[i, "leadingEdge"][[1]][[1]]
+  height.fig <- (0.11 * length(genes) ) + 2
+  g <- DoHeatmap(sc, features = genes, raster = F) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+  ggsave(paste0(plots_path, "Heatmaps_GO.BP/Hm.", fgsea$pathway[i], ".DEG.pdf"), g, width=7, height=height.fig)
+}
+
+##################################################### KEGG ######## KEGG 
+######## KEGG ######## KEGG ######## KEGG ######## KEGG ######## KEGG ######## KEGG 
+##################################################### KEGG ######## KEGG 
+keep.gs <- x[grep("^KEGG_", x$gs_name, value = F), ] %>% pull(gs_name) %>% unique()
+length(keep.gs)
+msig.custom <- x %>% filter(gs_name %in% keep.gs)
+names(table(msig.custom$gs_name))
+msig.custom <- as.data.frame(msig.custom[,c(2, 5)])
+openxlsx::write.xlsx(msig.custom , paste0(calculations_path, "KEGG.xlsx"), zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = F)
+msig.custom <- split(msig.custom$human_gene_symbol, msig.custom$gs_name)
+summary(sapply(msig.custom, length))
+# summary(sapply(msig.custom[sig_pathways], length))
+fgsea.4 <- fgsea(pathways = msig.custom , 
+                        stats = ranks1,
+                        minSize=15,
+                        maxSize=500,
+                        nperm = 1000)
+head(fgsea.4[order(NES, decreasing = T), ])
+tail(fgsea.4[order(NES, decreasing = T), ])
+head(fgsea.4[order(pval), ])
+data.table::fwrite(fgsea.4[order(pval), ], file=paste0(calculations_path, "fgsea_C11_vs_B2_KEGG.tsv"), sep="\t", sep2=c("", " ", ""))
+
+pdf(paste0(plots_path, "FGSEA.tb.KEGG.pdf"), width=12, height=15)
+topPathways <- fgsea.4[head(order(pval), n=50)][order(NES, decreasing = T), pathway]
+plotGseaTable(msig.custom[topPathways], ranks1, fgsea.4)
+dev.off()
+
+idx <- msig.custom 
+fgsea <- fgsea.4
+dir.create(paste0(plots_path, "Heatmaps_KEGG"), recursive = T)
+DefaultAssay(sc) <- "RNA"
+for (i in 1:nrow(fgsea)) {
+  genes <- fgsea[i, "leadingEdge"][[1]][[1]]
+  height.fig <- (0.11 * length(genes) ) + 2
+  g <- DoHeatmap(sc, features = genes, raster = F) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+  ggsave(paste0(plots_path, "Heatmaps_KEGG/Hm.", fgsea$pathway[i], ".DEG.pdf"), g, width=7, height=height.fig)
+}
+
+msig <- scan(paste0(cremwd, "/reference_data/gene_sets/lung.matur.differ.MSig.txt"), what="", sep="\n") # Read in the data
+msig <- sapply(msig, function(k) gsub(",$", "", k))
+msig <- strsplit(msig, ",[[:space:]]+")  # Separate elements by a comma and one or more whitepace
+names(msig) <- sapply(msig, `[[`, 1)  # subset the first vector element and set it as the list element name
+msig <- lapply(msig, `[`, -1) # Remove the first vector element from each list element
+msig <- msig[1:2]
+msig <- unlist(msig)
+genes.plot <- unique(c( "SFTPC", msig, "SFTPB", "SFTPD", "SFTPA1", "SFTPA2", "NKX2-1", "MKI67", "TM4SF1" ,"SQSTM1", "KRT5", "SCGB1A1", "FOXJ1","PTPRC", "CDH5", "EPCAM", "COL1A1","ATP6V0B"  ))
+DefaultAssay(sc) <- "RNA"
+sc$orig.ident <- as.vector(sc$orig.ident)
+Idents(sc) <- "orig.ident"
+project <- sub(".*workspace/(.*tas).*", "\\1", plots_path)
+p <- DotPlot(sc, features = rev(genes.plot),  assay = "RNA") 
+p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+ggsave(paste0(plots_path, "Dot.JCL.", project, ".pdf"), p, width = 10, height = 4.5)
+
+
+project <- sub(".*workspace/(.*tas).*", "\\1", plots_path)
+p <- DotPlot(sc, features = rev(genes.plot),  assay = "RNA") 
+p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+ggsave(paste0(plots_path, "Dot.JCL.", project, ".pdf"), p, width = 10, height = 4.5)
+p <- VlnPlot(sc, features = genes.plot, group.by = "orig.ident", pt.size = 0.1, assay = "RNA")
+p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+ggsave(paste0(plots_path, "Vln.JCL.", project, ".pdf"), p, width = 15, height = 15)
+
+library(ggsignif)
+p <- VlnPlot(sc, features = "ATP6V0B", group.by = "annot", pt.size = 0.1, assay = "RNA")
+# p <- p +  geom_signif(comparisons = list(c("versicolor", "virginica")), map_signif_level=TRUE)
+  # geom_signif(y_position=c(5.3, 8.3), xmin=c(0.8, 1.8), xmax=c(1.2, 2.2),
+              # annotation=c("**", "NS"), tip_length=0)
+p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+ggsave(paste0(plots_path, "Vln.JCL.ATP6V0B.pdf"), p, width = 3, height = 3)
+
+p <- VlnPlot(sc, features = "SQSTM1", group.by = "annot", pt.size = 0.1, assay = "RNA")
+# p <- p +  geom_signif(comparisons = list(c("versicolor", "virginica")), map_signif_level=TRUE)
+  # geom_signif(y_position=c(5.3, 8.3), xmin=c(0.8, 1.8), xmax=c(1.2, 2.2),
+              # annotation=c("**", "NS"), tip_length=0)
+p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+ggsave(paste0(plots_path, "Vln.JCL.SQSTM1.pdf"), p, width = 3, height = 3)
+```
+
+
+
+
+
+```{r save_object}
+saveRDS(sc, paste0(rds_path, "sc.Rds"))
+
+```
+
+```{r}
+mas.pair1 <- readxl::read_excel(paste0(calculations_path, "DEG.pairwise.C11_vs_B2.annot.xlsx")) 
+countDEG <- mas.pair1 %>% filter(p_val_adj < 0.05)
+table(countDEG$avg_logFC < 0)
+genes.heatmap <- mas.pair1 %>% dplyr::filter(p_val_adj < 0.05) %>% dplyr::arrange(desc(avg_logFC)) %>% dplyr::filter(row_number() %in% 1:50 | row_number() %in% (n()-49):n()) %>% pull(row.names)
+as.factor(sc$annot)
+Idents(sc) <- "annot"
+g <- DoHeatmap(sc, features = rev(genes.heatmap), raster = F) + scale_fill_gradientn(colors = c("blue", "white", "red"))
+ggsave(paste0(plots_path, "Hm.top50.up.and.dn.C11vsB2.DEG.pdf"), g, width=7, height=14)
+
+
+save.rnk <- function(results, name) {
+  rnk <- data.frame(results[order(results$avg_logFC,decreasing=T),])
+  rnk <- rnk[!is.na(rnk$avg_logFC),c("row.names","avg_logFC"), drop = F]
+ # rnk$avg_logFC <- scale(rnk$avg_logFC)[,]
+  write.table(rnk, file=paste0(calculations_path, name), row.names = F, col.names = F, quote=F, sep="\t")
+}
+save.rnk(mas.pair1, "C11vsB2.d113.rnk")
+
+plot_complex_heatmap <- function(genes, highlight_gene_names, row_names_gp=5) {
+  cluster_names <- factor(sc$annot)
+  cluster_colors <- setNames( brewer.pal(length(levels(cluster_names)),"Set2"), levels(cluster_names) )[1:2] # == cols2, a named vector of color
+  unclipped.data <- GetAssayData(sc, slot = "scale.data", assay = "RNA")[genes,]
+  clipped.data <- ramify::clip(unclipped.data, -2.5, 2.5)
+   ht_manual <- list(
+ #   data = t(scale(t(GetAssayData(sc, slot = "data")[genes,]), center = TRUE, scale = TRUE)[,] ) ,
+    data = clipped.data ,
+    top_annotation = HeatmapAnnotation(
+      df = data.frame( Condition = cluster_names ),
+      col = list( Condition = cluster_colors )
+    )
+   ) 
+  indexes <- match(highlight_gene_names, rownames(ht_manual$data))
+  labels <- rownames(ht_manual$data)[indexes] 
+  ht_manual$ha <- rowAnnotation( foo = anno_mark(at = indexes, labels = labels), width = unit(1, "cm") + max_text_width(labels) )
+  ht_manual$heatmap <- Heatmap(ht_manual$data, 
+                               cluster_columns = FALSE, 
+                               cluster_rows = TRUE, 
+                               show_column_names = FALSE,
+                               show_row_names = TRUE,
+                               column_names_side = "top",
+                               top_annotation = ht_manual$top_annotation,
+                               name = "Expression z-score",
+                               col = colorRampPalette(rev(brewer.pal(9, "RdBu")))(100),
+                               column_title = ht_manual$column_title,
+                               heatmap_legend_param = list(
+                                 color_bar = "continuous",
+                                 legend_direction = "horizontal",
+                                 legend_width = unit(4, "cm")
+                               ),
+                               column_title_gp = gpar(fontsize = 20, fontface = "bold"),
+                               row_names_gp = gpar(fontsize = row_names_gp)
+  )
+  return(ht_manual)
+}
+genes.highlight <- list(
+  one = c("NAPSA", "LPCAT1", "SFTPC", "SLC34A2", "TDTOMATO-EXTRA-IVS", "SFTPB", "SLPI", "MUC1", "PGC", "CEACAM6", "SFTPA1",
+  "HMGA1", "HMGA2", "HMGB1", "HMGB2", "CDK1", "FOS", "FOSB", "WIF1"),
+  two = NULL
+  ) # "IRF9" and "IFNAR2" arent DEG
+library(ComplexHeatmap)
+for (i in 1) {
+  genes <- rev(genes.heatmap)
+  highlight_gene_names <- genes.highlight[[i]][ genes.highlight[[i]] %in% genes]
+  ht <- plot_complex_heatmap(genes, highlight_gene_names)
+  height.fig <- (0.05 * length(genes) ) + 1
+  pdf(paste0(plots_path, "Hm.top50.up.and.dn.C11vsB2.DEG.highlighted.zscore.byrow.col2.v4.pdf"), width=12, height=height.fig)
+  draw(ht$heatmap + ht$ha, heatmap_legend_side = "bottom")
+  dev.off()
+}
+
+DefaultAssay(sc) <- "SCT"
+p <- FeaturePlot(sc, features = "MKI67", cols = c("#f0f0f0", brewer.pal(9,"OrRd")) ) 
+p <- p & ggmin::theme_powerpoint() & NoAxes() & NoLegend()
+ggsave(paste0(plots_path, "UMAP.19_10_29_kostas.MKI67.pdf"), p)
+
+DefaultAssay(sc) <- "SCT"
+g <- DimPlot(sc, group.by = "orig.ident") + ggmin::theme_powerpoint()
+ggsave(paste0(plots_path, "UMAP.19_10_29_kostas.color.by.orig.ident.pdf"), g)
+```
+
+
+
+heatmaps of the top 50 differentially regulated (up and down) genes between B2 and C11 from the D113 experiment (19_10_29_kostas_B2_and_C11 This is the repeat late (D113) scRNAseq with the 2nd C11 subclone).
+
+violin for ATP6VOB only for B2 and C11 D113 samples.
+ordering : corrected cells (B2) first in all figs
+
+```{r}
+library(tidyverse)
+fgsea.1 <- read.table(paste0(calculations_path, "fgsea_C11_vs_B2_hallmarks.tsv"), sep="\t", header = T)
+
+head(fgsea.1)
+colnames(fgsea.1)
+fgsea.1[1:3,1:3]
+fgsea.1.sub <- fgsea.1 %>% filter(NES > 0) %>% filter(padj < 0.05)   #  %>% head(10) # they are pre-ordered by p-value
+fgsea.1.sub$Term <- fgsea.1.sub$pathway
+fgsea.1.sub$Significance <- ifelse(fgsea.1.sub$padj < 0.05, "FDR < 0.05", "Not sig.")
+fgsea.1.sub$Significance <- factor(fgsea.1.sub$Significance, level = c("FDR < 0.05", "Not sig."))
+fgsea.1.sub$Term <- sub("HALLMARK_", "", fgsea.1.sub$Term)
+fgsea.1.sub$Term <- gsub("_", " ", fgsea.1.sub$Term)
+fgsea.1.sub$`-log(P-value)` <- -log(fgsea.1.sub$pval)
+p <- ggplot(fgsea.1.sub, aes(x=reorder(Term, `-log(P-value)`), y=`-log(P-value)`,fill=Significance)) +
+  geom_bar(stat='identity') +
+  coord_flip() + 
+  theme_minimal() +
+  theme(axis.text=element_text(size=15, face = "bold"), axis.title.y=element_blank()) +
+  scale_fill_manual(name = "Significance",values = setNames( c("grey20", "grey"), c("FDR < 0.05", "Not sig.") )) +
+  ylab("Evidence of enrichment [-log(P value)]") 
+ggsave(paste0(plots_path, "/Bp.FGSEA.top10.enriched.Hallmarks.C11vsB2.logp.pdf"), p, width = 9, height = 10)
+
+p <- ggplot(fgsea.1.sub, aes(x=reorder(Term, `NES`), y=`NES`,fill=Significance)) +
+  geom_bar(stat='identity') +
+  coord_flip() + 
+  theme_minimal() +
+  theme(axis.text=element_text(size=15, face = "bold"), axis.title.y=element_blank()) +
+  scale_fill_manual(name = "Significance",values = setNames( c("grey20", "grey"), c("FDR < 0.05", "Not sig.") )) +
+  ylab("Evidence of enrichment [Normalized enrichment score]") 
+ggsave(paste0(plots_path, "/Bp.FGSEA.top10.enriched.Hallmarks.C11vsB2.NES.pdf"), p, width = 9, height = 10)
+
+
+p <- ggplot(fgsea.1.sub, aes(x=reorder(Term, `NES`), y=`NES`)) +
+  geom_bar(stat='identity') +
+  coord_flip() + 
+  theme_minimal() +
+  theme(axis.text=element_text(size=15, face = "bold"), axis.title.y=element_blank()) +
+ # scale_fill_manual(name = "Significance",values = setNames( c("grey20", "grey"), c("FDR < 0.05", "Not sig.") )) +
+  ylab("Evidence of enrichment [Normalized enrichment score]") 
+ggsave(paste0(plots_path, "/Bp.FGSEA.top10.enriched.Hallmarks.C11vsB2.NES.onlySig.pdf"), p, width = 9, height = 7)
+
+
+
+head(fgsea.1[order(NES, decreasing = T), ])
+tail(fgsea.1[order(NES, decreasing = T), ])
+head(fgsea.1[order(pval), ])
+```
+
+
+```{r}
+fmas.pair.final <- function(sc, res, id1, id2, subsets, suffix) {
+    file_out <- paste0(calculations_path, "DEG.pairwise.", suffix, ".", res, ".pct.0.10.logfc.0.15.FDR.0.05.xlsx")
+    seurat.markers <- FindMarkers(sc, test.use = "MAST", only.pos = FALSE, min.pct = 0.10, logfc.threshold = 0.15, verbose = F, group.by = res,  ident.1 = id1, ident.2 = id2, subset.ident = subsets)
+    seurat.markers.summary <- as.data.frame(seurat.markers) %>%  rownames_to_column('gene') %>% dplyr::filter(p_val_adj < 0.05) %>% dplyr::arrange(desc(avg_logFC)) 
+    openxlsx::write.xlsx(seurat.markers.summary, file_out, zoom = 100, asTable = TRUE, tableStyle = "none", rowNames = T)
+    return(list(all = seurat.markers, top = seurat.markers.summary))
+}
+mas.pair1.final <- fmas.pair.final(sc, "annot", id1 = "C11", id2 = "B2", subsets = NULL, suffix = "C11_vs_B2")
+mas.pair1.final[[2]] %>%   
+  summarise(upDEG = sum(avg_logFC>0),
+         dnDEG = sum(avg_logFC<0))
+#   upDEG dnDEG
+# 1   501   606
+
+colnames(sc[[]])
+table(sc$annot)
+msig <- scan(paste0(cremwd, "/reference_data/gene_sets/lung.matur.differ.MSig.txt"), what="", sep="\n") # Read in the data
+msig <- sapply(msig, function(k) gsub(",$", "", k))
+msig <- strsplit(msig, ",[[:space:]]+")  # Separate elements by a comma and one or more whitepace
+names(msig) <- sapply(msig, `[[`, 1)  # subset the first vector element and set it as the list element name
+msig <- lapply(msig, `[`, -1) # Remove the first vector element from each list element        
+msig <- msig[1:2]
+sc <- AddModuleScore(sc, features = msig, name = names(msig), search = T)
+sc <- AddMetaData(sc, sc[[paste0(names(msig), 1:length(names(msig)))]], col.name = names(msig))
+for(i in paste0(names(msig), 1:length(names(msig)))) {
+  sc[[i]] <- NULL
+}
+
+msig <- read_csv(paste0(cremwd, "/reference_data/gene_sets/msig.kostas.cr.csv"), comment = "#", col_names = F)
+msig <- split(msig$X1, msig$X2)
+sc <- AddModuleScore(sc, features = msig, name = names(msig), search = T)
+sc <- AddMetaData(sc, sc[[paste0(names(msig), 1:length(names(msig)))]], col.name = names(msig))
+for(i in paste0(names(msig), 1:length(names(msig)))) {
+  sc[[i]] <- NULL
+}
+colnames(sc[[]])
+Idents(sc) <- "annot"
+feats <- c(names(msig), c(msig[[1]], msig[[2]]))
+feats <- names(msig)
+feat <- "NFKBIA"
+plot.violin.feat <- function(feat) {
+  #if (feat %in% rownames(sc) ) {
+     p <- VlnPlot(sc, features = feat, group.by = "annot", pt.size = 0.1, assay = "RNA") 
+  p <- p & ggmin::theme_powerpoint()  & RotatedAxis() & theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + NoLegend()
+  ggsave(paste0(plots_path, "Vln.",prefix,".",  feat, ".annot.pdf"), p,  width = 2, height = 4)
+  # }
+ }
+sapply(feats, plot.violin.feat)
+
+plot.UMAP.feat <- function(feat) {
+      # if (feat %in% rownames(sc) ) {
+  p <- FeaturePlot(sc, features = feat) 
+  p <- p & ggmin::theme_powerpoint() & NoAxes()
+  ggsave(paste0(plots_path, "UMAP.",prefix,".", feat, ".pdf"), p, width = 4, height = 3.5)
+      # }
+}
+sapply(feats, plot.UMAP.feat)
+
+t.rst <- t.test(sc$HALLMARK_GLYCOLYSIS  ~ sc$annot )
+t.rst1 <- t.test(sc$HALLMARK_TNFA_SIGNALING_VIA_NFKB  ~ sc$annot)
+t.rst2 <- t.test(sc$KEGG_REGULATION_OF_AUTOPHAGY  ~ sc$annot )
+t.rst3 <- t.test(sc$REACTOME_AUTOPHAGY  ~ sc$annot )
+
+writeLines(capture.output(print(list(t.rst, t.rst1, t.rst2, t.rst3))), 
+           con = file(paste0(calculations_path, "t.tests_enrichment.scores.txt")))
+
+```
